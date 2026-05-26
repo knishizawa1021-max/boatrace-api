@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from bs4 import BeautifulSoup
 import asyncio
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import re
 import logging
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ VENUE_CODES = {
     "tokuyama":"17","shimonoseki":"18","wakamatsu":"19","ashiya":"20",
     "karatsu":"21","omura":"22","fukuoka":"23","saga":"24"
 }
+VENUE_NAMES = {v: k for k, v in VENUE_CODES.items()}
 
 BASE_URL = "https://www.boatrace.jp"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BoatRaceApp/1.0; personal use)", "Accept-Language": "ja-JP,ja;q=0.9"}
@@ -42,10 +44,10 @@ async def fetch(url, retries=3):
                 await asyncio.sleep(2)
     return None
 
-def today():
-    return date.today().strftime("%Y%m%d")
+def get_date(offset=0):
+    return (date.today() + timedelta(days=offset)).strftime("%Y%m%d")
 
-def cached(key, ttl, data):
+def cached(key, data):
     cache[key] = {"data": data, "ts": datetime.now().timestamp()}
     return data
 
@@ -121,9 +123,6 @@ def parse_racecard(html):
     try:
         rows = soup.select("tbody.is-fs12 tr, .table1 tbody tr")
         for row in rows:
-            cells = row.find_all("td")
-            if len(cells) < 5:
-                continue
             course_el = row.select_one(".table1_bodyNumber, td:first-child")
             if not course_el:
                 continue
@@ -133,8 +132,7 @@ def parse_racecard(html):
             course = int(m.group())
             name_el = row.select_one(".is-fs18, .table1_bodyName")
             name = name_el.get_text(strip=True) if name_el else "---"
-            racer = {"course": course, "name": name}
-            racers.append(racer)
+            racers.append({"course": course, "name": name})
     except Exception as e:
         logger.error(f"Racecard parse error: {e}")
     return racers
@@ -148,17 +146,59 @@ def parse_result(html):
             cells = row.find_all("td")
             if len(cells) < 3:
                 continue
-            rank_el = cells[0]
-            course_el = cells[1] if len(cells) > 1 else None
-            name_el = cells[2] if len(cells) > 2 else None
-            rank = rank_el.get_text(strip=True)
-            course = course_el.get_text(strip=True) if course_el else ""
-            name = name_el.get_text(strip=True) if name_el else ""
+            rank = cells[0].get_text(strip=True)
+            course = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+            name = cells[2].get_text(strip=True) if len(cells) > 2 else ""
             if re.match(r"[1-6]", rank) and re.match(r"[1-6]", course):
                 results.append({"rank": int(rank), "course": int(course), "name": name})
     except Exception as e:
         logger.error(f"Result parse error: {e}")
     return results
+
+def parse_schedule(html, target_date):
+    soup = BeautifulSoup(html, "lxml")
+    venues = []
+    try:
+        items = soup.select(".table1 tbody tr, .schTable tbody tr")
+        for row in items:
+            cells = row.find_all("td")
+            if not cells:
+                continue
+            venue_el = row.select_one(".schTable_bodyVenue, td:first-child")
+            if not venue_el:
+                continue
+            venue_name = venue_el.get_text(strip=True)
+            code = next((v for k, v in VENUE_CODES.items() if venue_name in k or k in venue_name), None)
+            if code:
+                venues.append({"venue_id": VENUE_NAMES.get(code, code), "venue_name": venue_name, "date": target_date})
+    except Exception as e:
+        logger.error(f"Schedule parse error: {e}")
+    return venues
+
+async def fetch_tomorrow_schedule():
+    tomorrow = get_date(1)
+    logger.info(f"翌日スケジュール取得開始: {tomorrow}")
+    html = await fetch(f"{BASE_URL}/owpc/pc/race/monthlyschedule?ym={tomorrow[:6]}")
+    if not html:
+        logger.error("スケジュール取得失敗")
+        return
+    venues = parse_schedule(html, tomorrow)
+    key = f"schedule_{tomorrow}"
+    cached(key, {"date": tomorrow, "venues": venues, "fetched_at": datetime.now().isoformat()})
+    logger.info(f"翌日スケジュール取得完了: {len(venues)}場")
+
+scheduler = AsyncIOScheduler(timezone="Asia/Tokyo")
+
+@app.on_event("startup")
+async def startup():
+    scheduler.add_job(fetch_tomorrow_schedule, "cron", hour=23, minute=0)
+    scheduler.start()
+    logger.info("スケジューラー起動: 毎日23時に翌日情報を取得")
+    await fetch_tomorrow_schedule()
+
+@app.on_event("shutdown")
+async def shutdown():
+    scheduler.shutdown()
 
 @app.get("/")
 async def root():
@@ -168,57 +208,66 @@ async def root():
 async def health():
     return {"status": "healthy", "time": datetime.now().isoformat()}
 
+@app.get("/api/schedule/{target_date}")
+async def get_schedule(target_date: str):
+    key = f"schedule_{target_date}"
+    if c := get_cache(key, CACHE_TTL_LONG): return c
+    html = await fetch(f"{BASE_URL}/owpc/pc/race/monthlyschedule?ym={target_date[:6]}")
+    if not html: return {"error": "Failed", "venues": []}
+    venues = parse_schedule(html, target_date)
+    return cached(key, {"date": target_date, "venues": venues, "fetched_at": datetime.now().isoformat()})
+
 @app.get("/api/racelist/{venue_id}")
 async def get_racelist(venue_id: str):
-    key = f"racelist_{venue_id}_{today()}"
+    key = f"racelist_{venue_id}_{get_date()}"
     if c := get_cache(key, CACHE_TTL_SHORT): return c
     code = VENUE_CODES.get(venue_id)
     if not code: return {"error": "Invalid venue", "races": []}
-    html = await fetch(f"{BASE_URL}/owpc/pc/race/raceindex?jcd={code}&hd={today()}")
+    html = await fetch(f"{BASE_URL}/owpc/pc/race/raceindex?jcd={code}&hd={get_date()}")
     if not html: return {"error": "Failed", "races": []}
     races = parse_racelist(html)
-    return cached(key, CACHE_TTL_SHORT, {"venue_id": venue_id, "races": races, "fetched_at": datetime.now().isoformat()})
+    return cached(key, {"venue_id": venue_id, "races": races, "fetched_at": datetime.now().isoformat()})
 
 @app.get("/api/racecard/{venue_id}/{race_no}")
 async def get_racecard(venue_id: str, race_no: int):
-    key = f"racecard_{venue_id}_{race_no}_{today()}"
+    key = f"racecard_{venue_id}_{race_no}_{get_date()}"
     if c := get_cache(key, CACHE_TTL_LONG): return c
     code = VENUE_CODES.get(venue_id)
     if not code: return {"error": "Invalid venue", "racers": []}
-    html = await fetch(f"{BASE_URL}/owpc/pc/race/racelist?rno={race_no}&jcd={code}&hd={today()}")
+    html = await fetch(f"{BASE_URL}/owpc/pc/race/racelist?rno={race_no}&jcd={code}&hd={get_date()}")
     if not html: return {"error": "Failed", "racers": []}
     racers = parse_racecard(html)
-    return cached(key, CACHE_TTL_LONG, {"venue_id": venue_id, "race_no": race_no, "racers": racers, "fetched_at": datetime.now().isoformat()})
+    return cached(key, {"venue_id": venue_id, "race_no": race_no, "racers": racers, "fetched_at": datetime.now().isoformat()})
 
 @app.get("/api/exhibition/{venue_id}/{race_no}")
 async def get_exhibition(venue_id: str, race_no: int):
-    key = f"ex_{venue_id}_{race_no}_{today()}"
+    key = f"ex_{venue_id}_{race_no}_{get_date()}"
     if c := get_cache(key, CACHE_TTL_SHORT): return c
     code = VENUE_CODES.get(venue_id)
     if not code: return {"error": "Invalid venue", "times": {}}
-    html = await fetch(f"{BASE_URL}/owpc/pc/race/beforeinfo?rno={race_no}&jcd={code}&hd={today()}")
+    html = await fetch(f"{BASE_URL}/owpc/pc/race/beforeinfo?rno={race_no}&jcd={code}&hd={get_date()}")
     if not html: return {"error": "Failed", "times": {}}
     times = parse_exhibition(html)
-    return cached(key, CACHE_TTL_SHORT, {"venue_id": venue_id, "race_no": race_no, "times": times, "fetched_at": datetime.now().isoformat()})
+    return cached(key, {"venue_id": venue_id, "race_no": race_no, "times": times, "fetched_at": datetime.now().isoformat()})
 
 @app.get("/api/odds/{venue_id}/{race_no}")
 async def get_odds(venue_id: str, race_no: int):
-    key = f"odds_{venue_id}_{race_no}_{today()}"
+    key = f"odds_{venue_id}_{race_no}_{get_date()}"
     if c := get_cache(key, CACHE_TTL_SHORT): return c
     code = VENUE_CODES.get(venue_id)
     if not code: return {"error": "Invalid venue", "odds": {}}
-    html = await fetch(f"{BASE_URL}/owpc/pc/race/odds3t?rno={race_no}&jcd={code}&hd={today()}")
+    html = await fetch(f"{BASE_URL}/owpc/pc/race/odds3t?rno={race_no}&jcd={code}&hd={get_date()}")
     if not html: return {"error": "Failed", "odds": {}}
     odds = parse_odds(html)
-    return cached(key, CACHE_TTL_SHORT, {"venue_id": venue_id, "race_no": race_no, "odds": odds, "fetched_at": datetime.now().isoformat()})
+    return cached(key, {"venue_id": venue_id, "race_no": race_no, "odds": odds, "fetched_at": datetime.now().isoformat()})
 
 @app.get("/api/result/{venue_id}/{race_no}")
 async def get_result(venue_id: str, race_no: int):
-    key = f"result_{venue_id}_{race_no}_{today()}"
+    key = f"result_{venue_id}_{race_no}_{get_date()}"
     if c := get_cache(key, CACHE_TTL_SHORT): return c
     code = VENUE_CODES.get(venue_id)
     if not code: return {"error": "Invalid venue", "results": []}
-    html = await fetch(f"{BASE_URL}/owpc/pc/race/raceresult?rno={race_no}&jcd={code}&hd={today()}")
+    html = await fetch(f"{BASE_URL}/owpc/pc/race/raceresult?rno={race_no}&jcd={code}&hd={get_date()}")
     if not html: return {"error": "Failed", "results": []}
     results = parse_result(html)
-    return cached(key, CACHE_TTL_SHORT, {"venue_id": venue_id, "race_no": race_no, "results": results, "fetched_at": datetime.now().isoformat()})
+    return cached(key, {"venue_id": venue_id, "race_no": race_no, "results": results, "fetched_at": datetime.now().isoformat()})

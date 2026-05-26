@@ -159,18 +159,23 @@ def parse_schedule(html, target_date):
     soup = BeautifulSoup(html, "lxml")
     venues = []
     try:
-        items = soup.select(".table1 tbody tr, .schTable tbody tr")
-        for row in items:
-            cells = row.find_all("td")
-            if not cells:
+        links = soup.select("a[href*='raceindex']")
+        seen = set()
+        for link in links:
+            href = link.get("href", "")
+            m = re.search(r"jcd=(\d+)&hd=(\d+)", href)
+            if not m:
                 continue
-            venue_el = row.select_one(".schTable_bodyVenue, td:first-child")
-            if not venue_el:
+            jcd = m.group(1)
+            hd = m.group(2)
+            if hd != target_date:
                 continue
-            venue_name = venue_el.get_text(strip=True)
-            code = next((v for k, v in VENUE_CODES.items() if venue_name in k or k in venue_name), None)
-            if code:
-                venues.append({"venue_id": VENUE_NAMES.get(code, code), "venue_name": venue_name, "date": target_date})
+            if jcd in seen:
+                continue
+            seen.add(jcd)
+            venue_id = VENUE_NAMES.get(jcd)
+            if venue_id:
+                venues.append({"venue_id": venue_id, "jcd": jcd, "date": hd})
     except Exception as e:
         logger.error(f"Schedule parse error: {e}")
     return venues
@@ -271,3 +276,4 @@ async def get_result(venue_id: str, race_no: int):
     if not html: return {"error": "Failed", "results": []}
     results = parse_result(html)
     return cached(key, {"venue_id": venue_id, "race_no": race_no, "results": results, "fetched_at": datetime.now().isoformat()})
+

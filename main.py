@@ -159,7 +159,7 @@ def parse_schedule(html, target_date):
     soup = BeautifulSoup(html, "lxml")
     venues = []
     try:
-        links = soup.select("a[href*='raceindex']")
+        links = soup.select("a[href*='raceindex'], a[href*='assen']")
         seen = set()
         for link in links:
             href = link.get("href", "")
@@ -276,4 +276,5 @@ async def get_result(venue_id: str, race_no: int):
     if not html: return {"error": "Failed", "results": []}
     results = parse_result(html)
     return cached(key, {"venue_id": venue_id, "race_no": race_no, "results": results, "fetched_at": datetime.now().isoformat()})
+
 

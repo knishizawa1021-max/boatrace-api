@@ -328,3 +328,22 @@ async def get_racer_kimari(racer_id: str):
     kimari = parse_kimari(html)
     return cached(key, {"racer_id": racer_id, "kimari": kimari, "fetched_at": datetime.now().isoformat()})
 
+
+@app.get("/api/debug/racer/{racer_id}")
+async def debug_racer(racer_id: str):
+    url = f"{BASE_URL}/owpc/pc/data/racersearch/course?toban={racer_id}"
+    html = await fetch(url)
+    if not html:
+        return {"error": "Failed to fetch"}
+    soup = BeautifulSoup(html, "lxml")
+    tables = soup.select("table")
+    result = []
+    for i, table in enumerate(tables):
+        rows = table.find_all("tr")
+        table_data = []
+        for row in rows:
+            cells = [c.get_text(strip=True) for c in row.find_all(["td","th"])]
+            if cells:
+                table_data.append(cells)
+        result.append({"table": i, "rows": table_data[:5]})
+    return {"tables": result}

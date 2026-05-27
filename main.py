@@ -283,30 +283,35 @@ def parse_kimari(html):
     soup = BeautifulSoup(html, "lxml")
     result = {}
     try:
-        tables = soup.select("table.is-w748")
+        def safe_float(t):
+            t = t.replace("%","").strip()
+            try: return float(t)
+            except: return 0.0
+
+        tables = soup.select("table")
+        course_data = {}
         for table in tables:
-            rows = table.select("tbody tr")
+            rows = table.find_all("tr")
             for row in rows:
-                cells = row.find_all("td")
-                if len(cells) < 8:
+                cells = row.find_all(["td","th"])
+                if len(cells) < 2:
                     continue
-                course_el = cells[0].get_text(strip=True)
-                m = re.search(r"\d", course_el)
+                first = cells[0].get_text(strip=True)
+                m = re.match(r"^([1-6])$", first)
                 if not m:
                     continue
-                course = m.group()
-                def safe_float(el):
-                    t = el.get_text(strip=True).replace("%","")
-                    try: return float(t)
-                    except: return 0.0
-                result[course] = {
-                    "nige": safe_float(cells[1]) if len(cells) > 1 else 0,
-                    "nigashi": safe_float(cells[2]) if len(cells) > 2 else 0,
-                    "sashi": safe_float(cells[3]) if len(cells) > 3 else 0,
-                    "makuri": safe_float(cells[4]) if len(cells) > 4 else 0,
-                    "makurisashi": safe_float(cells[5]) if len(cells) > 5 else 0,
-                    "norimai": safe_float(cells[6]) if len(cells) > 6 else 0,
-                }
+                course = m.group(1)
+                val = cells[1].get_text(strip=True)
+                if course not in course_data:
+                    course_data[course] = []
+                course_data[course].append(val)
+
+        for course, vals in course_data.items():
+            result[course] = {
+                "nyuuritsu": safe_float(vals[0]) if len(vals) > 0 else 0,
+                "sanrenritsu": safe_float(vals[1]) if len(vals) > 1 else 0,
+                "avg_st": safe_float(vals[2]) if len(vals) > 2 else 0,
+            }
     except Exception as e:
         logger.error(f"Kimari parse error: {e}")
     return result
@@ -322,3 +327,4 @@ async def get_racer_kimari(racer_id: str):
         return {"error": "Failed", "kimari": {}}
     kimari = parse_kimari(html)
     return cached(key, {"racer_id": racer_id, "kimari": kimari, "fetched_at": datetime.now().isoformat()})
+

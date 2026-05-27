@@ -286,31 +286,39 @@ def parse_kimari(html):
         def safe_float(t):
             t = t.replace("%","").strip()
             try: return float(t)
-            except: return 0.0
+            except: return None
 
         tables = soup.select("table")
-        course_data = {}
+        nyuuritsu = {}
+        sanrenritsu = {}
+        avg_st = {}
+
         for table in tables:
-            rows = table.find_all("tr")
+            header = table.find("th") or table.find("td")
+            if not header:
+                continue
+            header_text = header.get_text(strip=True)
+            rows = table.find_all("tr")[1:]
             for row in rows:
                 cells = row.find_all(["td","th"])
                 if len(cells) < 2:
                     continue
-                first = cells[0].get_text(strip=True)
-                m = re.match(r"^([1-6])$", first)
-                if not m:
-                    continue
-                course = m.group(1)
+                course = cells[0].get_text(strip=True)
                 val = cells[1].get_text(strip=True)
-                if course not in course_data:
-                    course_data[course] = []
-                course_data[course].append(val)
+                if not re.match(r"^[1-6]$", course):
+                    continue
+                if "進入率" in header_text:
+                    nyuuritsu[course] = safe_float(val)
+                elif "3連対率" in header_text:
+                    sanrenritsu[course] = safe_float(val)
+                elif "スタートタイミング" in header_text:
+                    avg_st[course] = safe_float(val)
 
-        for course, vals in course_data.items():
+        for course in "123456":
             result[course] = {
-                "nyuuritsu": safe_float(vals[0]) if len(vals) > 0 else 0,
-                "sanrenritsu": safe_float(vals[1]) if len(vals) > 1 else 0,
-                "avg_st": safe_float(vals[2]) if len(vals) > 2 else 0,
+                "nyuuritsu": nyuuritsu.get(course),
+                "sanrenritsu": sanrenritsu.get(course),
+                "avg_st": avg_st.get(course),
             }
     except Exception as e:
         logger.error(f"Kimari parse error: {e}")
@@ -347,3 +355,4 @@ async def debug_racer(racer_id: str):
                 table_data.append(cells)
         result.append({"table": i, "rows": table_data[:5]})
     return {"tables": result}
+

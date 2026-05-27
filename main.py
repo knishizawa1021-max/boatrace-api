@@ -60,23 +60,48 @@ def parse_exhibition(html):
     soup = BeautifulSoup(html, "lxml")
     result = {}
     try:
-        rows = soup.select("table.is-w748 tbody tr")
-        for row in rows:
-            course_el = row.select_one("td.is-fs14")
-            if not course_el:
-                continue
-            m = re.search(r"\d", course_el.get_text())
-            if not m:
-                continue
-            course = m.group()
-            et = st = None
-            for td in row.find_all("td"):
-                txt = td.get_text(strip=True)
-                if re.match(r"^6\.\d{2}$", txt):
-                    et = txt
-                elif re.match(r"^[FLS]?\d?\.\d{2}$", txt) and txt != et:
-                    st = txt
-            result[course] = {"exhibitionTime": et, "startTiming": st}
+        tables = soup.select("table.is-w748")
+        for table in tables:
+            rows = table.select("tbody tr")
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) < 3:
+                    continue
+                course_el = row.select_one("td.is-fs14")
+                if not course_el:
+                    continue
+                m = re.search(r"^[1-6]$", course_el.get_text(strip=True))
+                if not m:
+                    continue
+                course = m.group()
+                def safe_val(txt):
+                    return txt if txt and txt != "-" and txt != "--" else None
+                et = st = tilt = ot = None
+                for td in cells:
+                    txt = td.get_text(strip=True)
+                    if re.match(r"^6\.\d{2}$", txt):
+                        et = txt
+                    elif re.match(r"^[FL]?\d?\.\d{2}$", txt) and txt != et:
+                        try:
+                            if float(re.sub(r"[FL]", "0", txt)) <= 0.99:
+                                st = txt
+                        except:
+                            pass
+                    elif re.match(r"^[+-]?\d+\.5$|^[+-]?\d+\.0$", txt):
+                        try:
+                            v = float(txt)
+                            if -1.0 <= v <= 3.0:
+                                tilt = txt
+                        except:
+                            pass
+                    elif re.match(r"^3\.\d{3}$", txt):
+                        ot = txt
+                result[course] = {
+                    "exhibitionTime": safe_val(et),
+                    "startTiming": safe_val(st),
+                    "tilt": safe_val(tilt),
+                    "lapTime": safe_val(ot),
+                }
     except Exception as e:
         logger.error(f"Exhibition parse error: {e}")
     return result
@@ -355,4 +380,5 @@ async def debug_racer(racer_id: str):
                 table_data.append(cells)
         result.append({"table": i, "rows": table_data[:5]})
     return {"tables": result}
+
 

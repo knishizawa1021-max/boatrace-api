@@ -278,3 +278,47 @@ async def get_result(venue_id: str, race_no: int):
     return cached(key, {"venue_id": venue_id, "race_no": race_no, "results": results, "fetched_at": datetime.now().isoformat()})
 
 
+
+def parse_kimari(html):
+    soup = BeautifulSoup(html, "lxml")
+    result = {}
+    try:
+        tables = soup.select("table.is-w748")
+        for table in tables:
+            rows = table.select("tbody tr")
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) < 8:
+                    continue
+                course_el = cells[0].get_text(strip=True)
+                m = re.search(r"\d", course_el)
+                if not m:
+                    continue
+                course = m.group()
+                def safe_float(el):
+                    t = el.get_text(strip=True).replace("%","")
+                    try: return float(t)
+                    except: return 0.0
+                result[course] = {
+                    "nige": safe_float(cells[1]) if len(cells) > 1 else 0,
+                    "nigashi": safe_float(cells[2]) if len(cells) > 2 else 0,
+                    "sashi": safe_float(cells[3]) if len(cells) > 3 else 0,
+                    "makuri": safe_float(cells[4]) if len(cells) > 4 else 0,
+                    "makurisashi": safe_float(cells[5]) if len(cells) > 5 else 0,
+                    "norimai": safe_float(cells[6]) if len(cells) > 6 else 0,
+                }
+    except Exception as e:
+        logger.error(f"Kimari parse error: {e}")
+    return result
+
+@app.get("/api/racer/{racer_id}/kimari")
+async def get_racer_kimari(racer_id: str):
+    key = f"kimari_{racer_id}"
+    if c := get_cache(key, 86400):
+        return c
+    url = f"{BASE_URL}/owpc/pc/data/racersearch/course?toban={racer_id}"
+    html = await fetch(url)
+    if not html:
+        return {"error": "Failed", "kimari": {}}
+    kimari = parse_kimari(html)
+    return cached(key, {"racer_id": racer_id, "kimari": kimari, "fetched_at": datetime.now().isoformat()})

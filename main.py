@@ -60,48 +60,65 @@ def parse_exhibition(html):
     soup = BeautifulSoup(html, "lxml")
     result = {}
     try:
+        def safe_val(txt):
+            return txt if txt and txt not in ["-", "--", ""] else None
+
         tables = soup.select("table.is-w748")
         for table in tables:
-            rows = table.select("tbody tr")
+            rows = table.find_all("tr")
+            current_course = None
             for row in rows:
                 cells = row.find_all("td")
-                if len(cells) < 3:
+                if not cells:
                     continue
-                course_el = row.select_one("td.is-fs14")
-                if not course_el:
+                texts = [c.get_text(strip=True) for c in cells]
+
+                # コース番号行を検出
+                course_match = None
+                for txt in texts:
+                    if re.match(r"^[1-6]$", txt):
+                        course_match = txt
+                        break
+                if course_match:
+                    current_course = course_match
+                    if current_course not in result:
+                        result[current_course] = {
+                            "exhibitionTime": None,
+                            "startTiming": None,
+                            "tilt": None,
+                            "lapTime": None,
+                        }
+                    # 同じ行から展示タイム・チルトを探す
+                    for txt in texts:
+                        if re.match(r"^6\.\d{2}$", txt):
+                            result[current_course]["exhibitionTime"] = safe_val(txt)
+                        elif re.match(r"^[+-]?\d\.\d$", txt):
+                            try:
+                                v = float(txt)
+                                if -1.0 <= v <= 3.0:
+                                    result[current_course]["tilt"] = safe_val(txt)
+                            except:
+                                pass
+                        elif re.match(r"^3\.\d{3}$", txt):
+                            result[current_course]["lapTime"] = safe_val(txt)
                     continue
-                m = re.search(r"^[1-6]$", course_el.get_text(strip=True))
-                if not m:
+
+                if current_course is None:
                     continue
-                course = m.group()
-                def safe_val(txt):
-                    return txt if txt and txt != "-" and txt != "--" else None
-                et = st = tilt = ot = None
-                for td in cells:
-                    txt = td.get_text(strip=True)
+
+                # ST行を検出
+                for i, txt in enumerate(texts):
+                    if txt == "ST" and i + 1 < len(texts):
+                        st_val = texts[i + 1]
+                        if re.match(r"^[FL]?\d?\.\d{2}$", st_val):
+                            result[current_course]["startTiming"] = safe_val(st_val)
+                    # 展示タイム
                     if re.match(r"^6\.\d{2}$", txt):
-                        et = txt
-                    elif re.match(r"^[FL]?\d?\.\d{2}$", txt) and txt != et:
-                        try:
-                            if float(re.sub(r"[FL]", "0", txt)) <= 0.99:
-                                st = txt
-                        except:
-                            pass
-                    elif re.match(r"^[+-]?\d+\.5$|^[+-]?\d+\.0$", txt):
-                        try:
-                            v = float(txt)
-                            if -1.0 <= v <= 3.0:
-                                tilt = txt
-                        except:
-                            pass
-                    elif re.match(r"^3\.\d{3}$", txt):
-                        ot = txt
-                result[course] = {
-                    "exhibitionTime": safe_val(et),
-                    "startTiming": safe_val(st),
-                    "tilt": safe_val(tilt),
-                    "lapTime": safe_val(ot),
-                }
+                        result[current_course]["exhibitionTime"] = safe_val(txt)
+                    # 周回タイム
+                    if re.match(r"^3\.\d{3}$", txt):
+                        result[current_course]["lapTime"] = safe_val(txt)
+
     except Exception as e:
         logger.error(f"Exhibition parse error: {e}")
     return result
@@ -404,3 +421,4 @@ async def debug_exhibition(venue_id: str, race_no: int):
                 table_data.append(cells)
         result.append({"table_index": i, "rows": table_data[:8]})
     return {"url": url, "tables_found": len(tables), "data": result}
+

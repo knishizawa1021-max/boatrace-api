@@ -382,3 +382,25 @@ async def debug_racer(racer_id: str):
     return {"tables": result}
 
 
+
+@app.get("/api/debug/exhibition/{venue_id}/{race_no}")
+async def debug_exhibition(venue_id: str, race_no: int):
+    code = VENUE_CODES.get(venue_id)
+    if not code:
+        return {"error": "Invalid venue"}
+    url = f"{BASE_URL}/owpc/pc/race/beforeinfo?rno={race_no}&jcd={code}&hd={get_date()}"
+    html = await fetch(url)
+    if not html:
+        return {"error": "Failed to fetch"}
+    soup = BeautifulSoup(html, "lxml")
+    tables = soup.select("table.is-w748")
+    result = []
+    for i, table in enumerate(tables):
+        rows = table.find_all("tr")
+        table_data = []
+        for row in rows:
+            cells = [c.get_text(strip=True) for c in row.find_all(["td","th"])]
+            if cells:
+                table_data.append(cells)
+        result.append({"table_index": i, "rows": table_data[:8]})
+    return {"url": url, "tables_found": len(tables), "data": result}
